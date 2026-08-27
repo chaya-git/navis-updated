@@ -1,0 +1,55 @@
+<?xml version='1.0' encoding='utf-8'?>
+<widget id="com.robomanthan.navis" version="1.0.0"
+    xmlns="http://www.w3.org/ns/widgets"
+    xmlns:cdv="http://cordova.apache.org/ns/1.0"
+    xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <name>Navis</name>
+    <description>Navis AI Assistant and Direct ESP32 Controller</description>
+    <author email="hello@robomanthan.com" href="https://robomanthan.com">Robo Manthan Team</author>
+    <content src="index.html" />
+
+    <access origin="*" />
+    <allow-intent href="http://*/*" />
+    <allow-intent href="https://*/*" />
+    <allow-intent href="ws://*/*" />
+    <allow-intent href="wss://*/*" />
+
+    <preference name="Orientation" value="portrait" />
+    <preference name="Fullscreen" value="true" />
+    <preference name="KeepRunning" value="true" />
+
+    <!-- Serve as HTTP locally so ws:// is not blocked as mixed content -->
+    <preference name="scheme" value="http" />
+    <preference name="hostname" value="localhost" />
+
+    <!-- Allow ws:// connections from the local WebView context -->
+    <preference name="MixedContentMode" value="0" />
+
+    <!-- Allow Audio/TTS playback without explicit user gestures -->
+    <preference name="MediaPlaybackRequiresUserAction" value="false" />
+    <preference name="MediaTypesRequiringUserActionForPlayback" value="none" />
+    <preference name="AllowInlineMediaPlayback" value="true" />
+
+    <!-- Android engine -->
+    <engine name="android" spec="12.0.1" />
+
+    <platform name="android">
+        <preference name="android-minSdkVersion" value="22" />
+        <preference name="android-targetSdkVersion" value="33" />
+
+        <!-- Allow cleartext HTTP/WS traffic to local ESP32 -->
+        <edit-config file="app/src/main/AndroidManifest.xml" mode="merge" target="/manifest/application">
+            <application android:usesCleartextTraffic="true" />
+        </edit-config>
+
+        <!-- Runtime permissions -->
+        <config-file target="AndroidManifest.xml" parent="/*">
+            <uses-permission android:name="android.permission.RECORD_AUDIO" />
+            <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+            <uses-permission android:name="android.permission.INTERNET" />
+        </config-file>
+
+        <allow-intent href="market:*" />
+    </platform>
+</widget>

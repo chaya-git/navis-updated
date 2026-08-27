@@ -1,0 +1,22 @@
+# Build artifacts
+navis_apk_build/
+navis_app.zip
+voltbuilder_navis.zip
+
+# Gradle
+gradle-*/
+android/.gradle/
+android/app/build/
+android/build/
+
+# Node
+node_modules/
+
+# Backend secrets & runtime data
+backend/.env
+.env
+backend/data/
+
+# OS
+.DS_Store
+Thumbs.db

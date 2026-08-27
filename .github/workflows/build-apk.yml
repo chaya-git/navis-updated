@@ -1,0 +1,88 @@
+name: Build Navis Android APK
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build-apk:
+    runs-on: ubuntu-latest
+
+    env:
+      ANDROID_HOME: /usr/local/lib/android/sdk
+      ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
+
+    steps:
+      # 1. Checkout
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # 2. Java 17
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      # 3. Accept SDK licenses & install required components
+      - name: Setup Android SDK components
+        run: |
+          yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses || true
+          $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager \
+            "platform-tools" \
+            "platforms;android-34" \
+            "build-tools;34.0.0"
+
+      # 4. Install Gradle 8.3 directly (no wrapper needed)
+      - name: Install Gradle 8.3
+        run: |
+          wget -q https://services.gradle.org/distributions/gradle-8.3-bin.zip -O /tmp/gradle.zip
+          unzip -q /tmp/gradle.zip -d /opt/gradle
+          echo "/opt/gradle/gradle-8.3/bin" >> $GITHUB_PATH
+
+      # 5. Generate app icons from the logo
+      - name: Generate app icons
+        run: |
+          pip3 install Pillow
+          python3 - <<'EOF'
+          from PIL import Image
+          import os
+          img = Image.open('images/robomanthan_logo.png').convert('RGBA')
+          sizes = {'mdpi': 48, 'hdpi': 72, 'xhdpi': 96, 'xxhdpi': 144, 'xxxhdpi': 192}
+          for density, size in sizes.items():
+              d = f'android/app/src/main/res/mipmap-{density}'
+              os.makedirs(d, exist_ok=True)
+              bg = Image.new('RGBA', (size, size), (8, 11, 26, 255))
+              s = int(size * 0.75)
+              r = img.resize((s, s), Image.LANCZOS)
+              o = (size - s) // 2
+              bg.paste(r, (o, o), r)
+              bg.convert('RGB').save(f'{d}/ic_launcher.png')
+              print(f'Created {d}/ic_launcher.png ({size}px)')
+          EOF
+
+      # 6. Copy web files into Android assets
+      - name: Copy web files to assets
+        run: |
+          mkdir -p android/app/src/main/assets/www/images
+          cp index.html app.js style.css connection.css manifest.json sw.js \
+             android/app/src/main/assets/www/
+          cp images/* android/app/src/main/assets/www/images/
+
+      # 7. Build debug APK
+      - name: Build APK
+        working-directory: android
+        run: gradle assembleDebug --no-daemon --stacktrace
+
+      # 8. Find and display APK path
+      - name: Locate APK
+        run: find android -name "*.apk" 2>/dev/null
+
+      # 9. Upload APK as downloadable artifact
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: Navis-Android-APK
+          path: android/app/build/outputs/apk/debug/app-debug.apk
+          retention-days: 30
