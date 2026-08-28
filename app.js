@@ -86,7 +86,11 @@ const WAKE_WORD_KNOWN_VARIANTS = new Set([
     'navis', 'navas', 'naviz', 'nafis', 'navies', 'navi', 'navys',
     'naveez', 'navees', 'gnavis', 'knavish',
     'name is', 'the name is', 'navy is', 'the navis', 'an avis',
-    'a navis', 'nervous', 'navvies', 'knavvish', 'navis is', 'navi says'
+    'a navis', 'nervous', 'navvies', 'knavvish', 'navis is', 'navi says',
+    // Additional common mishearings/mispronunciations reported by customers
+    'mavis', 'davis', 'travis', 'alexis', 'avis', 'navish', 'navus',
+    'nevis', 'nabis', 'nawis', 'nayvis', 'naabis', 'nabbiss', 'novis',
+    'navas', 'nervis', 'navice', 'nevas', 'nervous', 'nabhis', 'nawvis'
 ]);
 
 // Fuzzy check: strips all non-letters from the candidate (so multi-word
@@ -101,7 +105,10 @@ function normalizeLetters(str) {
 function isCloseToWakeWord(candidateLetters) {
     if (!candidateLetters) return false;
     const dist = levenshteinDistance(candidateLetters, WAKE_WORD);
-    const threshold = Math.min(3, Math.max(2, Math.ceil(candidateLetters.length / 2.5)));
+    // Slightly more forgiving than a strict match, so different accents and
+    // imperfect pronunciations of "Navis" still pass the gate, while still
+    // keeping the tolerance capped so unrelated words don't slip through.
+    const threshold = Math.min(3, Math.max(2, Math.ceil(candidateLetters.length / 2)));
     return dist <= threshold;
 }
 
@@ -265,6 +272,11 @@ class NavisApp {
         this._ttsKicker = null;
         this._jawKeepalive = null;
         this._speechPoller = null;   // polls speechSynthesis.speaking to detect true end
+        this._silenceTimer = null;   // fallback timer for immediate mic cutoff on silence
+        // How long to wait with no new speech before closing the mic.
+        // Lower = mic closes faster after the person stops talking, but
+        // too low risks cutting someone off mid-sentence if they pause.
+        this.SILENCE_TIMEOUT_MS = 1600;
 
         // Persistent Audio Element for Cloud TTS
         this.audioElement = new Audio();
@@ -624,6 +636,9 @@ class NavisApp {
                 .map(r => r[0].transcript).join('');
             this.els.userInput.value = transcript;
             this.autoResize();
+            // Any new speech (even partial/interim) resets the silence timer —
+            // the mic should only close after speech actually stops.
+            this.resetSilenceTimer();
             if (e.results[0] && e.results[0].isFinal) {
                 this.stopRecording();
                 setTimeout(() => this.sendMessage(), 50);
@@ -632,6 +647,7 @@ class NavisApp {
 
         this.recognition.onerror = (e) => {
             console.error('Speech error:', e.error);
+            this.clearSilenceTimer();
             this.stopRecording();
             if (e.error === 'not-allowed') {
                 this.continuousListening = false;
@@ -639,7 +655,17 @@ class NavisApp {
             }
         };
 
+        // Browser-native voice-activity detection: fires as soon as the
+        // recognizer decides the person has stopped speaking. Stopping here
+        // (rather than waiting for the recognizer's own internal timeout)
+        // is what makes the mic close immediately on silence.
+        this.recognition.onspeechend = () => {
+            this.clearSilenceTimer();
+            try { this.recognition.stop(); } catch (e) { /* already stopped */ }
+        };
+
         this.recognition.onend = () => {
+            this.clearSilenceTimer();
             this.stopRecording();
             // Keep listening even while Navis is speaking/processing, so the
             // user can interrupt with "Navis stop" mid-response. Only skip
@@ -683,6 +709,29 @@ class NavisApp {
         });
     }
 
+    /* ── Silence detection (immediate mic cutoff) ─────────────────────
+       onspeechend handles most browsers, but it isn't universally
+       supported/reliable (notably some Android WebViews), so this timer
+       is a fallback: if no new speech (interim or final) arrives within
+       SILENCE_TIMEOUT_MS of starting, or within that window after the
+       last bit of speech, the mic is force-stopped rather than left open
+       waiting on the recognizer's own (often much longer) timeout. */
+    resetSilenceTimer() {
+        this.clearSilenceTimer();
+        this._silenceTimer = setTimeout(() => {
+            if (this.isRecording) {
+                try { this.recognition.stop(); } catch (e) { /* already stopped */ }
+            }
+        }, this.SILENCE_TIMEOUT_MS);
+    }
+
+    clearSilenceTimer() {
+        if (this._silenceTimer) {
+            clearTimeout(this._silenceTimer);
+            this._silenceTimer = null;
+        }
+    }
+
     startRecording() {
         if (!this.recognition) { this.toast('Voice not supported in this browser', 'error'); return; }
         if (this.isRecording) return;
@@ -694,12 +743,15 @@ class NavisApp {
             this.els.voiceBtn.classList.add('recording');
             this.els.userInput.placeholder = 'Listening...';
             try { this.recognition.start(); } catch (e) { console.error('recognition.start error:', e); }
+            // Grace period to start speaking before we treat it as silence.
+            this.resetSilenceTimer();
         });
     }
 
     stopRecording() {
         if (!this.isRecording) return;
         this.isRecording = false;
+        this.clearSilenceTimer();
         this.els.voiceBtn.classList.remove('recording');
         this.els.userInput.placeholder = 'Ask Navis anything...';
         try { this.recognition.stop(); } catch (e) { }
