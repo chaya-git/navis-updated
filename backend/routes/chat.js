@@ -5,8 +5,8 @@ const configStore = require("../lib/configStore");
 const router = express.Router();
 
 const GROQ_ENDPOINT = "https://api.groq.com/openai/v1/chat/completions";
-const DEFAULT_MODEL = "llama-3.3-70b-versatile";
-const MAX_TOKENS_CAP = 300; // safety cap regardless of what the client requests
+const DEFAULT_MODEL = "openai/gpt-oss-120b";
+const MAX_TOKENS_CAP = 500; // safety cap regardless of what the client requests
 
 /**
  * POST /api/chat
@@ -40,7 +40,17 @@ router.post("/", async (req, res) => {
                 model: model || DEFAULT_MODEL,
                 messages,
                 temperature: typeof temperature === "number" ? temperature : 0.7,
-                max_tokens: Math.min(Number(max_tokens) || 60, MAX_TOKENS_CAP),
+                max_tokens: Math.min(Number(max_tokens) || 400, MAX_TOKENS_CAP),
+                // Groq's gpt-oss reasoning models spend part of max_tokens on
+                // internal "thinking" before writing the visible reply. Keeping
+                // reasoning effort low leaves more of that budget for the
+                // actual answer (important for short, snappy chatbot replies).
+                // Harmless no-op if the selected model doesn't support it.
+                reasoning_effort: "low",
+                // gpt-oss models put their internal reasoning in a separate
+                // `reasoning` field on the response by default; we only ever
+                // want the visible answer, never the raw chain-of-thought.
+                include_reasoning: false,
             },
             {
                 headers: {
@@ -52,6 +62,18 @@ router.post("/", async (req, res) => {
         );
 
         const reply = response.data?.choices?.[0]?.message?.content;
+
+        if (!reply || !reply.trim()) {
+            // The model returned no visible content (e.g. it spent its whole
+            // token budget on internal reasoning). Treat this the same as a
+            // provider failure rather than sending an empty chat bubble.
+            console.error("[chat] Model returned empty content:", JSON.stringify(response.data?.choices?.[0]));
+            return res.status(502).json({
+                success: false,
+                error: "AI service is temporarily unavailable. Please contact the administrator.",
+            });
+        }
+
         return res.json({ success: true, reply });
     } catch (err) {
         const status = err.response?.status;

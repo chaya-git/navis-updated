@@ -1255,7 +1255,7 @@ class NavisApp {
                     model: 'openai/gpt-oss-120b',
                     messages: apiMessages,
                     temperature: 0.7,
-                    max_tokens: 60
+                    max_tokens: 400
                 }),
                 signal: this.abortController.signal
             });
