@@ -273,9 +273,13 @@ class NavisApp {
         this._jawKeepalive = null;
         this._speechPoller = null;   // polls speechSynthesis.speaking to detect true end
         this._silenceTimer = null;   // fallback timer for immediate mic cutoff on silence
-        // How long to wait with no new speech before closing the mic.
-        // Lower = mic closes faster after the person stops talking, but
-        // too low risks cutting someone off mid-sentence if they pause.
+        this._heardSpeechThisSession = false; // guards onspeechend against firing before any speech
+        // How long to wait with NO speech at all yet before giving up
+        // (covers mic permission prompts / device warm-up time).
+        this.INITIAL_LISTEN_GRACE_MS = 6000;
+        // Once the person has started talking, how long to wait with no
+        // NEW speech before closing the mic. Lower = closes faster after
+        // they stop talking, but too low risks cutting off mid-sentence.
         this.SILENCE_TIMEOUT_MS = 1600;
 
         // Persistent Audio Element for Cloud TTS
@@ -636,9 +640,11 @@ class NavisApp {
                 .map(r => r[0].transcript).join('');
             this.els.userInput.value = transcript;
             this.autoResize();
+            this._heardSpeechThisSession = true;
             // Any new speech (even partial/interim) resets the silence timer —
-            // the mic should only close after speech actually stops.
-            this.resetSilenceTimer();
+            // the mic should only close after speech actually stops. Speech
+            // has now been heard, so use the short post-speech cutoff.
+            this.resetSilenceTimer(true);
             if (e.results[0] && e.results[0].isFinal) {
                 this.stopRecording();
                 setTimeout(() => this.sendMessage(), 50);
@@ -659,7 +665,12 @@ class NavisApp {
         // recognizer decides the person has stopped speaking. Stopping here
         // (rather than waiting for the recognizer's own internal timeout)
         // is what makes the mic close immediately on silence.
+        // Guarded against firing before any speech was actually heard — some
+        // browsers can fire this almost immediately on start due to a brief
+        // initial silence, which would otherwise cut the mic before the
+        // person gets a chance to speak at all.
         this.recognition.onspeechend = () => {
+            if (!this._heardSpeechThisSession) return;
             this.clearSilenceTimer();
             try { this.recognition.stop(); } catch (e) { /* already stopped */ }
         };
@@ -716,13 +727,14 @@ class NavisApp {
        SILENCE_TIMEOUT_MS of starting, or within that window after the
        last bit of speech, the mic is force-stopped rather than left open
        waiting on the recognizer's own (often much longer) timeout. */
-    resetSilenceTimer() {
+    resetSilenceTimer(heardSpeechYet) {
         this.clearSilenceTimer();
+        const delay = heardSpeechYet ? this.SILENCE_TIMEOUT_MS : this.INITIAL_LISTEN_GRACE_MS;
         this._silenceTimer = setTimeout(() => {
             if (this.isRecording) {
                 try { this.recognition.stop(); } catch (e) { /* already stopped */ }
             }
-        }, this.SILENCE_TIMEOUT_MS);
+        }, delay);
     }
 
     clearSilenceTimer() {
@@ -740,11 +752,13 @@ class NavisApp {
         this.requestMicPermission().then(granted => {
             if (!granted) return;
             this.isRecording = true;
+            this._heardSpeechThisSession = false;
             this.els.voiceBtn.classList.add('recording');
             this.els.userInput.placeholder = 'Listening...';
             try { this.recognition.start(); } catch (e) { console.error('recognition.start error:', e); }
-            // Grace period to start speaking before we treat it as silence.
-            this.resetSilenceTimer();
+            // Long grace period to allow for permission prompts/mic warm-up
+            // before the person has said anything yet.
+            this.resetSilenceTimer(false);
         });
     }
 
