@@ -274,6 +274,7 @@ class NavisApp {
         this._speechPoller = null;   // polls speechSynthesis.speaking to detect true end
         this._silenceTimer = null;   // fallback timer for immediate mic cutoff on silence
         this._heardSpeechThisSession = false; // guards onspeechend against firing before any speech
+        this.nativeTTSReady = false; // true only inside the packaged Android app, once cordova-plugin-tts is available
         // How long to wait with NO speech at all yet before giving up
         // (covers mic permission prompts / device warm-up time).
         this.INITIAL_LISTEN_GRACE_MS = 6000;
@@ -816,6 +817,16 @@ class NavisApp {
         const detectedLang = this.detectLanguage(clean);
         const langCode = langHint || detectedLang || this.getSelectedLang();
 
+        // ── Native Android TTS (packaged app only) ──────────────────────
+        // Preferred inside the Cordova app: the WebView's own
+        // speechSynthesis is unreliable there (can report success while
+        // producing no audio). Falls through to the web-based methods
+        // below on every other platform (regular browsers), unchanged.
+        if (this.nativeTTSReady && window.TTS) {
+            this.speakWithNativeTTS(clean, langCode);
+            return;
+        }
+
         // ── Primary: Web Speech API (built-in Android WebView, no network needed) ──
         if (window.speechSynthesis) {
             this.speakWithWebSpeech(clean, langCode);
@@ -846,6 +857,41 @@ class NavisApp {
             this.toast('⚠️ Voice unavailable offline', 'error');
             this.onSpeechDone();
         }
+    }
+
+    speakWithNativeTTS(text, langCode) {
+        // Same duration-estimation approach as speakWithWebSpeech, so the
+        // jaw/mouth animation behaves identically regardless of which TTS
+        // engine actually produced the audio.
+        const isIndic = langCode.startsWith('hi') || langCode.startsWith('kn');
+        const charsPerSec = isIndic ? 8 : 11;
+        const estimatedMs = Math.max(1500, (text.length / charsPerSec) * 1000);
+
+        let durationTimer = null;
+        const scheduleDone = (delay) => {
+            if (durationTimer) clearTimeout(durationTimer);
+            durationTimer = setTimeout(() => {
+                if (!this.speechStopped) this.onSpeechDone();
+            }, delay);
+        };
+        // Safety net in case the plugin's success/failure callback never fires.
+        scheduleDone(estimatedMs + 2000);
+
+        window.TTS.speak(
+            { text, locale: langCode, rate: 0.95 },
+            () => {
+                // Native engine reports done — close shortly after for a
+                // natural trailing pause, matching the web-speech path.
+                scheduleDone(300);
+            },
+            (reason) => {
+                console.error('Native TTS error:', reason);
+                if (durationTimer) { clearTimeout(durationTimer); durationTimer = null; }
+                this.stopJawKeepalive();
+                this.toast('Voice engine error', 'error');
+                this.onSpeechDone();
+            }
+        );
     }
 
     speakWithWebSpeech(text, langCode) {
@@ -1320,6 +1366,11 @@ class NavisApp {
         this.speechStopped = true;
         this.setMouthState(0);
 
+        // Stop native Android TTS (packaged app)
+        if (this.nativeTTSReady && window.TTS) {
+            try { window.TTS.stop(); } catch (e) { /* no-op */ }
+        }
+
         // Stop Web Speech API and all polling intervals
         if (window.speechSynthesis) {
             window.speechSynthesis.cancel();
@@ -1507,3 +1558,12 @@ class NavisApp {
 
 // ── Boot ─────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', () => window.navis = new NavisApp());
+
+// Only fires inside the packaged Cordova/Android app — never in a regular
+// mobile/desktop browser, so this is a safe no-op for the web deployment.
+document.addEventListener('deviceready', () => {
+    if (window.navis && window.TTS) {
+        window.navis.nativeTTSReady = true;
+        console.log('Native Android TTS plugin ready');
+    }
+}, false);
