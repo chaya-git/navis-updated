@@ -52,4 +52,11 @@
 
         <allow-intent href="market:*" />
     </platform>
+
+    <!-- Native Android TTS: the packaged app's WebView often implements
+         window.speechSynthesis incompletely (voices exist, speak() is a
+         silent no-op on many devices/Android versions) even though the
+         exact same code works fine in a real mobile browser. This plugin
+         uses Android's own TextToSpeech engine directly instead. -->
+    <plugin name="cordova-plugin-tts" spec="^0.2.3" />
 </widget>

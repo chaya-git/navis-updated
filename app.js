@@ -273,9 +273,14 @@ class NavisApp {
         this._jawKeepalive = null;
         this._speechPoller = null;   // polls speechSynthesis.speaking to detect true end
         this._silenceTimer = null;   // fallback timer for immediate mic cutoff on silence
-        // How long to wait with no new speech before closing the mic.
-        // Lower = mic closes faster after the person stops talking, but
-        // too low risks cutting someone off mid-sentence if they pause.
+        this._heardSpeechThisSession = false; // guards onspeechend against firing before any speech
+        this.nativeTTSReady = false; // true only inside the packaged Android app, once cordova-plugin-tts is available
+        // How long to wait with NO speech at all yet before giving up
+        // (covers mic permission prompts / device warm-up time).
+        this.INITIAL_LISTEN_GRACE_MS = 6000;
+        // Once the person has started talking, how long to wait with no
+        // NEW speech before closing the mic. Lower = closes faster after
+        // they stop talking, but too low risks cutting off mid-sentence.
         this.SILENCE_TIMEOUT_MS = 1600;
 
         // Persistent Audio Element for Cloud TTS
@@ -648,9 +653,11 @@ class NavisApp {
                 .map(r => r[0].transcript).join('');
             this.els.userInput.value = transcript;
             this.autoResize();
+            this._heardSpeechThisSession = true;
             // Any new speech (even partial/interim) resets the silence timer —
-            // the mic should only close after speech actually stops.
-            this.resetSilenceTimer();
+            // the mic should only close after speech actually stops. Speech
+            // has now been heard, so use the short post-speech cutoff.
+            this.resetSilenceTimer(true);
             if (e.results[0] && e.results[0].isFinal) {
                 this.stopRecording();
                 setTimeout(() => this.sendMessage(), 50);
@@ -671,7 +678,12 @@ class NavisApp {
         // recognizer decides the person has stopped speaking. Stopping here
         // (rather than waiting for the recognizer's own internal timeout)
         // is what makes the mic close immediately on silence.
+        // Guarded against firing before any speech was actually heard — some
+        // browsers can fire this almost immediately on start due to a brief
+        // initial silence, which would otherwise cut the mic before the
+        // person gets a chance to speak at all.
         this.recognition.onspeechend = () => {
+            if (!this._heardSpeechThisSession) return;
             this.clearSilenceTimer();
             try { this.recognition.stop(); } catch (e) { /* already stopped */ }
         };
@@ -728,13 +740,14 @@ class NavisApp {
        SILENCE_TIMEOUT_MS of starting, or within that window after the
        last bit of speech, the mic is force-stopped rather than left open
        waiting on the recognizer's own (often much longer) timeout. */
-    resetSilenceTimer() {
+    resetSilenceTimer(heardSpeechYet) {
         this.clearSilenceTimer();
+        const delay = heardSpeechYet ? this.SILENCE_TIMEOUT_MS : this.INITIAL_LISTEN_GRACE_MS;
         this._silenceTimer = setTimeout(() => {
             if (this.isRecording) {
                 try { this.recognition.stop(); } catch (e) { /* already stopped */ }
             }
-        }, this.SILENCE_TIMEOUT_MS);
+        }, delay);
     }
 
     clearSilenceTimer() {
@@ -752,11 +765,13 @@ class NavisApp {
         this.requestMicPermission().then(granted => {
             if (!granted) return;
             this.isRecording = true;
+            this._heardSpeechThisSession = false;
             this.els.voiceBtn.classList.add('recording');
             this.els.userInput.placeholder = 'Listening...';
             try { this.recognition.start(); } catch (e) { console.error('recognition.start error:', e); }
-            // Grace period to start speaking before we treat it as silence.
-            this.resetSilenceTimer();
+            // Long grace period to allow for permission prompts/mic warm-up
+            // before the person has said anything yet.
+            this.resetSilenceTimer(false);
         });
     }
 
@@ -814,6 +829,16 @@ class NavisApp {
         const detectedLang = this.detectLanguage(clean);
         const langCode = langHint || detectedLang || this.getSelectedLang();
 
+        // ── Native Android TTS (packaged app only) ──────────────────────
+        // Preferred inside the Cordova app: the WebView's own
+        // speechSynthesis is unreliable there (can report success while
+        // producing no audio). Falls through to the web-based methods
+        // below on every other platform (regular browsers), unchanged.
+        if (this.nativeTTSReady && window.TTS) {
+            this.speakWithNativeTTS(clean, langCode);
+            return;
+        }
+
         // ── Primary: Web Speech API (built-in Android WebView, no network needed) ──
         if (window.speechSynthesis) {
             this.speakWithWebSpeech(clean, langCode);
@@ -844,6 +869,41 @@ class NavisApp {
             this.toast('⚠️ Voice unavailable offline', 'error');
             this.onSpeechDone();
         }
+    }
+
+    speakWithNativeTTS(text, langCode) {
+        // Same duration-estimation approach as speakWithWebSpeech, so the
+        // jaw/mouth animation behaves identically regardless of which TTS
+        // engine actually produced the audio.
+        const isIndic = langCode.startsWith('hi') || langCode.startsWith('kn');
+        const charsPerSec = isIndic ? 8 : 11;
+        const estimatedMs = Math.max(1500, (text.length / charsPerSec) * 1000);
+
+        let durationTimer = null;
+        const scheduleDone = (delay) => {
+            if (durationTimer) clearTimeout(durationTimer);
+            durationTimer = setTimeout(() => {
+                if (!this.speechStopped) this.onSpeechDone();
+            }, delay);
+        };
+        // Safety net in case the plugin's success/failure callback never fires.
+        scheduleDone(estimatedMs + 2000);
+
+        window.TTS.speak(
+            { text, locale: langCode, rate: 0.95 },
+            () => {
+                // Native engine reports done — close shortly after for a
+                // natural trailing pause, matching the web-speech path.
+                scheduleDone(300);
+            },
+            (reason) => {
+                console.error('Native TTS error:', reason);
+                if (durationTimer) { clearTimeout(durationTimer); durationTimer = null; }
+                this.stopJawKeepalive();
+                this.toast('Voice engine error', 'error');
+                this.onSpeechDone();
+            }
+        );
     }
 
     speakWithWebSpeech(text, langCode) {
@@ -1318,6 +1378,11 @@ class NavisApp {
         this.speechStopped = true;
         this.setMouthState(0);
 
+        // Stop native Android TTS (packaged app)
+        if (this.nativeTTSReady && window.TTS) {
+            try { window.TTS.stop(); } catch (e) { /* no-op */ }
+        }
+
         // Stop Web Speech API and all polling intervals
         if (window.speechSynthesis) {
             window.speechSynthesis.cancel();
@@ -1505,3 +1570,12 @@ class NavisApp {
 
 // ── Boot ─────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', () => window.navis = new NavisApp());
+
+// Only fires inside the packaged Cordova/Android app — never in a regular
+// mobile/desktop browser, so this is a safe no-op for the web deployment.
+document.addEventListener('deviceready', () => {
+    if (window.navis && window.TTS) {
+        window.navis.nativeTTSReady = true;
+        console.log('Native Android TTS plugin ready');
+    }
+}, false);
