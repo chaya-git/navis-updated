@@ -9,4 +9,8 @@
      - Same host / reverse-proxied under the frontend: ''
      - Separate host (Render, Railway, etc.): 'https://navis-backend.onrender.com'
 */
-window.NAVIS_CONFIG = { BACKEND_URL: "https://navis-backend-fawn.onrender.com" };
+window.NAVIS_CONFIG = {
+    BACKEND_URL: (typeof window !== 'undefined' && (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1'))
+        ? ''
+        : 'https://navis-backend-fawn.onrender.com'
+};

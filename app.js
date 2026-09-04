@@ -315,6 +315,7 @@ class NavisApp {
 
         // If we have a saved IP, show the found result immediately
         if (savedIP) {
+            if (this.els.espIpInput) this.els.espIpInput.value = savedIP;
             this.showDiscoveredDevice(savedIP, '');
         }
     }
@@ -325,6 +326,17 @@ class NavisApp {
         if (this.els.discoverResult) this.els.discoverResult.style.display = 'none';
         this.setDiscoverStatus('Scanning network for Navis...', 'scanning');
 
+        // Strategy 0: Try typed IP in the input box
+        const typedIP = this.els.espIpInput?.value?.trim();
+        if (typedIP) {
+            this.setDiscoverStatus(`Testing ${typedIP}...`, 'scanning');
+            const typedResult = await this.probeHost(typedIP);
+            if (typedResult) {
+                this.onDeviceFound(typedResult);
+                return;
+            }
+        }
+
         // Strategy 1: Try mDNS hostname (navis.local)
         const mdnsResult = await this.probeHost('navis.local');
         if (mdnsResult) {
@@ -334,7 +346,7 @@ class NavisApp {
 
         // Strategy 2: Try last-known IP
         const lastIP = localStorage.getItem('esp32_ip');
-        if (lastIP) {
+        if (lastIP && lastIP !== typedIP) {
             const lastResult = await this.probeHost(lastIP);
             if (lastResult) {
                 this.onDeviceFound(lastResult);
@@ -344,7 +356,7 @@ class NavisApp {
 
         // Strategy 3: Subnet scan (common home networks)
         this.setDiscoverStatus('Scanning local subnets...', 'scanning');
-        const subnets = ['192.168.0', '192.168.1', '192.168.4', '10.0.0', '192.168.2', '192.168.10'];
+        const subnets = ['192.168.1', '192.168.0', '192.168.43', '192.168.29', '192.168.4', '10.0.0', '192.168.2', '192.168.10'];
 
         for (const subnet of subnets) {
             // Scan in batches of 25 for speed

@@ -1,6 +1,9 @@
 const express = require("express");
+const https = require("https");
 const axios = require("axios");
 const configStore = require("../lib/configStore");
+
+const httpsAgent = new https.Agent({ rejectUnauthorized: false });
 
 const router = express.Router();
 
@@ -26,11 +29,17 @@ router.post("/", async (req, res) => {
 
     const apiKey = configStore.getActiveApiKey();
     if (!apiKey) {
-        console.error("[chat] No AI API key configured (no dynamic key and AI_API_KEY is unset)");
-        return res.status(503).json({
-            success: false,
-            error: "AI service is temporarily unavailable. Please contact the administrator.",
-        });
+        try {
+            console.log("[chat] Forwarding to cloud backend at https://navis-backend-fawn.onrender.com...");
+            const cloudRes = await axios.post("https://navis-backend-fawn.onrender.com/api/chat", req.body, { timeout: 30000, httpsAgent });
+            return res.json(cloudRes.data);
+        } catch (cloudErr) {
+            console.error("[chat] Cloud proxy error:", cloudErr.message);
+            return res.status(503).json({
+                success: false,
+                error: "AI service is temporarily unavailable. Please contact the administrator.",
+            });
+        }
     }
 
     try {
@@ -58,6 +67,7 @@ router.post("/", async (req, res) => {
                     Authorization: `Bearer ${apiKey}`,
                 },
                 timeout: 20000,
+                httpsAgent,
             }
         );
 

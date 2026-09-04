@@ -8,6 +8,8 @@ const cors = require("cors");
 const chatRouter = require("./routes/chat");
 const adminRouter = require("./routes/admin");
 
+const path = require("path");
+
 const app = express();
 
 // Restrict CORS to configured origins when provided; otherwise stay open
@@ -31,6 +33,7 @@ app.use(
 );
 
 app.use(express.json({ limit: "1mb" }));
+app.use(express.static(path.join(__dirname, "..")));
 
 // ── Existing endpoint (unchanged) ──────────────────────────────────
 app.get("/fetch", async (req, res) => {
