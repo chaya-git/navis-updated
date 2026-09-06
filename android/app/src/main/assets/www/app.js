@@ -385,7 +385,8 @@ class NavisApp {
         if (this.els.discoverBtn) this.els.discoverBtn.disabled = false;
     }
 
-    async probeHost(host, timeoutMs = 600) {
+    async probeHost(host, timeoutMs = 800) {
+        // Method A: HTTP /discover fetch
         try {
             const controller = new AbortController();
             const timeout = setTimeout(() => controller.abort(), timeoutMs);
@@ -403,9 +404,31 @@ class NavisApp {
                 }
             }
         } catch (e) {
-            // Expected for offline IPs
+            // Expected if offline or blocked by browser mixed-content
         }
-        return null;
+
+        // Method B: Direct WebSocket probe (works across all network environments)
+        return new Promise((resolve) => {
+            try {
+                const ws = new WebSocket(`ws://${host}:81`);
+                const timer = setTimeout(() => {
+                    try { ws.close(); } catch (err) {}
+                    resolve(null);
+                }, timeoutMs);
+
+                ws.onopen = () => {
+                    clearTimeout(timer);
+                    try { ws.close(); } catch (err) {}
+                    resolve({ device: 'navis', ip: host, ws_port: 81 });
+                };
+                ws.onerror = () => {
+                    clearTimeout(timer);
+                    resolve(null);
+                };
+            } catch (err) {
+                resolve(null);
+            }
+        });
     }
 
     onDeviceFound(data, autoConnect = true) {
