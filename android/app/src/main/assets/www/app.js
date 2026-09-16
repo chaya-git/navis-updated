@@ -338,11 +338,27 @@ class NavisApp {
         if (this.els.discoverResult) this.els.discoverResult.style.display = 'none';
         this.setDiscoverStatus('🔍 Looking for Navis on your Wi-Fi...', 'scanning');
 
-        // Strategy 1: Try last-known IP first (fastest)
-        const lastIP = localStorage.getItem('esp32_ip') || this.els.espIpInput?.value?.trim();
+        // Strategy 0: If an IP is typed in the input box, try connecting to it directly!
+        const typedIP = this.els.espIpInput?.value?.trim();
+        if (typedIP) {
+            localStorage.setItem('esp32_ip', typedIP);
+            this.setDiscoverStatus(`Connecting to ${typedIP}...`, 'scanning');
+            const typedResult = await this.probeHost(typedIP, 400);
+            if (typedResult) {
+                this.onDeviceFound(typedResult, autoConnect);
+                return;
+            } else {
+                // Even if /discover had CORS issues, if user entered IP, directly try WebSocket!
+                this._doWebSocketConnect(typedIP);
+                return;
+            }
+        }
+
+        // Strategy 1: Try last-known IP from localStorage
+        const lastIP = localStorage.getItem('esp32_ip');
         if (lastIP) {
             this.setDiscoverStatus(`Checking ${lastIP}...`, 'scanning');
-            const lastResult = await this.probeHost(lastIP, 800);
+            const lastResult = await this.probeHost(lastIP, 400);
             if (lastResult) {
                 this.onDeviceFound(lastResult, autoConnect);
                 return;
@@ -350,34 +366,79 @@ class NavisApp {
         }
 
         // Strategy 2: Try mDNS hostname (navis.local)
-        const mdnsResult = await this.probeHost('navis.local', 800);
+        const mdnsResult = await this.probeHost('navis.local', 400);
         if (mdnsResult) {
             this.onDeviceFound(mdnsResult, autoConnect);
             return;
         }
 
-        // Strategy 3: Fast Subnet scan (common Wi-Fi networks)
+        // Strategy 3: Fast Parallel Subnet scan with worker pool
         this.setDiscoverStatus('Scanning local network for Navis...', 'scanning');
-        const subnets = ['192.168.1', '192.168.0', '192.168.29', '192.168.43', '10.0.0', '192.168.4', '192.168.2', '192.168.10'];
 
-        for (const subnet of subnets) {
-            // Scan in parallel batches of 50 for super fast discovery
-            for (let batchStart = 1; batchStart <= 254; batchStart += 50) {
-                const batchEnd = Math.min(batchStart + 49, 254);
-                this.setDiscoverStatus(`Scanning ${subnet}.${batchStart}-${batchEnd}...`, 'scanning');
-
-                const promises = [];
-                for (let i = batchStart; i <= batchEnd; i++) {
-                    promises.push(this.probeHost(`${subnet}.${i}`, 600));
-                }
-
-                const results = await Promise.all(promises);
-                const found = results.find(r => r !== null);
-                if (found) {
-                    this.onDeviceFound(found, autoConnect);
-                    return;
+        // Detect active local subnet
+        let activeSubnets = [];
+        try {
+            const netRes = await fetch('/api/local-network', { cache: 'no-store' }).catch(() => null);
+            if (netRes && netRes.ok) {
+                const netData = await netRes.json();
+                if (netData.subnets && Array.isArray(netData.subnets)) {
+                    activeSubnets = netData.subnets;
                 }
             }
+        } catch (e) {}
+
+        if (window.location.hostname && /^\d+\.\d+\.\d+\.\d+$/.test(window.location.hostname)) {
+            const p = window.location.hostname.split('.');
+            activeSubnets.unshift(`${p[0]}.${p[1]}.${p[2]}`);
+        }
+
+        const commonSubnets = ['192.168.0', '192.168.1', '192.168.43', '192.168.29', '10.0.0', '192.168.4', '192.168.2', '192.168.10'];
+        const subnets = Array.from(new Set([...activeSubnets, ...commonSubnets]));
+
+        const primarySubnet = subnets[0] || '192.168.0';
+        const targets = [];
+
+        // Prioritize DHCP range (.100 to .200) where ESP32s almost always sit
+        for (let i = 100; i <= 200; i++) targets.push(`${primarySubnet}.${i}`);
+        for (let i = 2; i <= 50; i++) targets.push(`${primarySubnet}.${i}`);
+        for (let i = 51; i <= 99; i++) targets.push(`${primarySubnet}.${i}`);
+        for (let i = 201; i <= 254; i++) targets.push(`${primarySubnet}.${i}`);
+
+        // Other subnets
+        for (let s = 1; s < subnets.length; s++) {
+            const sub = subnets[s];
+            for (let i = 100; i <= 200; i++) targets.push(`${sub}.${i}`);
+            for (let i = 2; i <= 50; i++) targets.push(`${sub}.${i}`);
+        }
+
+        let foundDevice = null;
+        const concurrency = 15;
+        let targetIndex = 0;
+
+        const worker = async () => {
+            while (targetIndex < targets.length && !foundDevice) {
+                const host = targets[targetIndex++];
+                if (!host) break;
+                try {
+                    const res = await this.probeHost(host, 350);
+                    if (res) {
+                        foundDevice = res;
+                        break;
+                    }
+                } catch (e) {}
+            }
+        };
+
+        const workers = [];
+        for (let w = 0; w < concurrency; w++) {
+            workers.push(worker());
+        }
+
+        await Promise.all(workers);
+
+        if (foundDevice) {
+            this.onDeviceFound(foundDevice, autoConnect);
+            return;
         }
 
         // Not found
@@ -385,8 +446,7 @@ class NavisApp {
         if (this.els.discoverBtn) this.els.discoverBtn.disabled = false;
     }
 
-    async probeHost(host, timeoutMs = 800) {
-        // Method A: HTTP /discover fetch
+    async probeHost(host, timeoutMs = 350) {
         try {
             const controller = new AbortController();
             const timeout = setTimeout(() => controller.abort(), timeoutMs);
@@ -399,36 +459,14 @@ class NavisApp {
 
             if (res.ok) {
                 const data = await res.json();
-                if (data.device === 'navis') {
+                if (data && data.device === 'navis') {
                     return data;
                 }
             }
         } catch (e) {
-            // Expected if offline or blocked by browser mixed-content
+            // Expected for offline IPs
         }
-
-        // Method B: Direct WebSocket probe (works across all network environments)
-        return new Promise((resolve) => {
-            try {
-                const ws = new WebSocket(`ws://${host}:81`);
-                const timer = setTimeout(() => {
-                    try { ws.close(); } catch (err) {}
-                    resolve(null);
-                }, timeoutMs);
-
-                ws.onopen = () => {
-                    clearTimeout(timer);
-                    try { ws.close(); } catch (err) {}
-                    resolve({ device: 'navis', ip: host, ws_port: 81 });
-                };
-                ws.onerror = () => {
-                    clearTimeout(timer);
-                    resolve(null);
-                };
-            } catch (err) {
-                resolve(null);
-            }
-        });
+        return null;
     }
 
     onDeviceFound(data, autoConnect = true) {
@@ -510,6 +548,10 @@ class NavisApp {
 
             this.ws.onopen = () => {
                 console.log('WebSocket Connected');
+                const pureIP = ip.replace(/^wss?:\/\//, '').split(':')[0];
+                localStorage.setItem('esp32_ip', pureIP);
+                if (this.els.espIpInput) this.els.espIpInput.value = pureIP;
+
                 this.updateConnectionStatus(true);
                 this.sendHardwareState(); // Send initial state
 

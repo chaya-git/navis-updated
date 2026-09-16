@@ -9,6 +9,7 @@ const chatRouter = require("./routes/chat");
 const adminRouter = require("./routes/admin");
 
 const path = require("path");
+const os = require("os");
 
 const app = express();
 
@@ -17,6 +18,23 @@ app.use(cors());
 
 app.use(express.json({ limit: "1mb" }));
 app.use(express.static(path.join(__dirname, "..")));
+
+// Return active local IPv4 subnets so frontend auto-discovery scans the correct subnet first
+app.get("/api/local-network", (req, res) => {
+    const interfaces = os.networkInterfaces();
+    const subnets = [];
+    for (const name in interfaces) {
+        for (const iface of interfaces[name]) {
+            if (iface.family === "IPv4" && !iface.internal) {
+                const parts = iface.address.split(".");
+                if (parts.length === 4) {
+                    subnets.push(`${parts[0]}.${parts[1]}.${parts[2]}`);
+                }
+            }
+        }
+    }
+    res.json({ subnets });
+});
 
 // ── Existing endpoint (unchanged) ──────────────────────────────────
 app.get("/fetch", async (req, res) => {
