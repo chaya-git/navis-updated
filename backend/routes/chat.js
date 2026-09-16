@@ -8,8 +8,8 @@ const httpsAgent = new https.Agent({ rejectUnauthorized: false });
 const router = express.Router();
 
 const GROQ_ENDPOINT = "https://api.groq.com/openai/v1/chat/completions";
-const DEFAULT_MODEL = "openai/gpt-oss-120b";
-const MAX_TOKENS_CAP = 500; // safety cap regardless of what the client requests
+const DEFAULT_MODEL = "openai/gpt-oss-20b";
+const MAX_TOKENS_CAP = 250; // fast concise response for robot speech
 
 /**
  * POST /api/chat

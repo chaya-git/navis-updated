@@ -1392,10 +1392,10 @@ class NavisApp {
                     'Content-Type': 'application/json'
                 },
                 body: JSON.stringify({
-                    model: 'openai/gpt-oss-120b',
+                    model: 'openai/gpt-oss-20b',
                     messages: apiMessages,
                     temperature: 0.7,
-                    max_tokens: 400
+                    max_tokens: 180
                 }),
                 signal: this.abortController.signal
             });
