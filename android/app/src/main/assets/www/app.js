@@ -446,27 +446,54 @@ class NavisApp {
         if (this.els.discoverBtn) this.els.discoverBtn.disabled = false;
     }
 
-    async probeHost(host, timeoutMs = 350) {
-        try {
-            const controller = new AbortController();
-            const timeout = setTimeout(() => controller.abort(), timeoutMs);
+    async probeHost(host, timeoutMs = 400) {
+        return new Promise((resolve) => {
+            let settled = false;
+            let ws = null;
+            let abortCtrl = null;
 
-            const res = await fetch(`http://${host}/discover`, {
-                signal: controller.signal,
-                cache: 'no-store'
-            });
-            clearTimeout(timeout);
-
-            if (res.ok) {
-                const data = await res.json();
-                if (data && data.device === 'navis') {
-                    return data;
+            const timer = setTimeout(() => {
+                if (!settled) {
+                    settled = true;
+                    if (abortCtrl) try { abortCtrl.abort(); } catch (e) {}
+                    if (ws) try { ws.close(); } catch (e) {}
+                    resolve(null);
                 }
-            }
-        } catch (e) {
-            // Expected for offline IPs
-        }
-        return null;
+            }, timeoutMs);
+
+            // Probe 1: HTTP /discover
+            try {
+                abortCtrl = new AbortController();
+                fetch(`http://${host}/discover`, { signal: abortCtrl.signal, cache: 'no-store' })
+                    .then(res => res.json())
+                    .then(data => {
+                        if (!settled && data && data.device === 'navis') {
+                            settled = true;
+                            clearTimeout(timer);
+                            if (ws) try { ws.close(); } catch (e) {}
+                            resolve({ device: 'navis', ip: host, rssi: data.rssi || -55 });
+                        }
+                    })
+                    .catch(() => {});
+            } catch (e) {}
+
+            // Probe 2: Direct WebSocket port 81 (bypasses browser CORS restrictions)
+            try {
+                ws = new WebSocket(`ws://${host}:81`);
+                ws.onopen = () => {
+                    if (!settled) {
+                        settled = true;
+                        clearTimeout(timer);
+                        if (abortCtrl) try { abortCtrl.abort(); } catch (e) {}
+                        try { ws.close(); } catch (e) {}
+                        resolve({ device: 'navis', ip: host, rssi: -50 });
+                    }
+                };
+                ws.onerror = () => {
+                    try { ws.close(); } catch (e) {}
+                };
+            } catch (e) {}
+        });
     }
 
     onDeviceFound(data, autoConnect = true) {
@@ -477,15 +504,16 @@ class NavisApp {
         if (this.els.espIpInput) this.els.espIpInput.value = ip;
         localStorage.setItem('esp32_ip', ip);
 
+        // Show the green "Navis Found!" card with IP and signal
         this.showDiscoveredDevice(ip, rssi);
         this.setDiscoverStatus(`Navis found at ${ip}! Connecting...`, 'success');
         if (this.els.discoverBtn) this.els.discoverBtn.disabled = false;
-        this.toast(`Navis connected at ${ip}`, 'success');
+        this.toast(`🤖 Navis Found at ${ip}! Connecting...`, 'success');
 
         if (autoConnect && !this.isConnected) {
             setTimeout(() => {
                 this._doWebSocketConnect(ip);
-            }, 300);
+            }, 1000); // 1-second pause so user sees "Navis Found!" card
         }
     }
 
@@ -496,8 +524,8 @@ class NavisApp {
         if (this.els.discoverFoundIp) {
             this.els.discoverFoundIp.textContent = ip;
         }
-        if (this.els.discoverSignal && rssi) {
-            const strength = rssi > -50 ? '🟢 Strong' : rssi > -70 ? '🟡 Good' : '🔴 Weak';
+        if (this.els.discoverSignal) {
+            const strength = (rssi && rssi > -60) ? '🟢 Strong' : '🟢 Online';
             this.els.discoverSignal.textContent = strength;
         }
     }
@@ -517,18 +545,20 @@ class NavisApp {
 
         let ip = this.els.espIpInput?.value?.trim();
 
-        // If no IP discovered yet, trigger discovery first then connect
+        // If no IP entered, scan network, show "Navis Found!", then connect!
         if (!ip) {
-            this.discoverESP32().then(() => {
-                const discoveredIP = this.els.espIpInput?.value?.trim();
-                if (discoveredIP) {
-                    this._doWebSocketConnect(discoveredIP);
-                }
-            });
+            this.discoverESP32(true);
             return;
         }
 
-        this._doWebSocketConnect(ip);
+        // If IP is present, show "Navis Found!" on that IP, then connect!
+        this.showDiscoveredDevice(ip, -50);
+        this.setDiscoverStatus(`Navis found at ${ip}! Connecting...`, 'success');
+        this.toast(`🤖 Navis Found at ${ip}! Connecting...`, 'success');
+
+        setTimeout(() => {
+            this._doWebSocketConnect(ip);
+        }, 1000);
     }
 
     _doWebSocketConnect(ip) {
